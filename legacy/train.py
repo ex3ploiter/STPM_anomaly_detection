@@ -15,6 +15,8 @@ from sklearn.metrics import roc_auc_score
 from tqdm import tqdm 
 from torchvision.datasets import CIFAR10, CIFAR100, MNIST, SVHN, FashionMNIST
 import pandas as pd
+import dill 
+
 
 #imagenet
 mean_train = [0.485, 0.456, 0.406]
@@ -95,13 +97,17 @@ def min_max_norm(image):
     return (image-a_min)/(a_max - a_min)    
 
 class STPM():
-    def __init__(self,attack_eps,steps,dataset_name,normal_class):
+    def __init__(self,attack_eps,steps,dataset_name,normal_class,load_robust):
+        self.load_robust=load_robust
         self.load_model()
         self.data_transform = data_transforms(load_size=load_size, mean_train=mean_train, std_train=std_train)
         self.eps=attack_eps
         self.steps=steps
         self.dataset_name=dataset_name
         self.normal_class=normal_class
+       
+       
+
 
     def load_dataset(self):
         image_datasets = datasets.ImageFolder(root=os.path.join(dataset_path, 'train'), transform=self.data_transform)
@@ -109,6 +115,31 @@ class STPM():
         dataset_sizes = {'train': len(image_datasets)}    
         print('Dataset size : Train set - {}'.format(dataset_sizes['train']))    
 
+    
+    def load_robust_model(self,model):
+        mode=1
+        resume_path='/content/STPM_anomaly_detection/legacy/resnet18_linf_eps8.0.ckpt?sv=2020-08-04&ss=bfqt&srt=sco&sp=rwdlacupitfx&se=2051-10-06T07:09:59Z&st=2021-10-05T23:09:59Z&spr=https,http&sig=U69sEOSMlliobiw8OgiZpLTaYyOA5yt5pHHH5%2FKUYgI='
+        # resume_path='/content/ExposureExperiment/resnet18_linf_eps8.0.ckpt?sv=2020-08-04&ss=bfqt&srt=sco&sp=rwdlacupitfx&se=2051-10-06T07:09:59Z&st=2021-10-05T23:09:59Z&spr=https,http&sig=U69sEOSMlliobiw8OgiZpLTaYyOA5yt5pHHH5%2FKUYgI='
+        
+        checkpoint = torch.load(resume_path, pickle_module=dill)
+        state_dict_path = 'model'
+        if not ('model' in checkpoint):
+            state_dict_path = 'state_dict'
+        
+        sd = checkpoint[state_dict_path]
+        sd = {k[len('module.'):]:v for k,v in sd.items()}
+
+        if mode ==0: # Model
+            sd_t = {k[len('model.'):]:v for k,v in sd.items() if k.split('.')[0]=='model'} 
+        
+        elif mode ==1: # Attacker
+            sd_t = {k[len('attacker.model.'):]:v for k,v in sd.items() if k.split('.')[0]=='attacker' and k.split('.')[1]!='normalize'}
+        
+
+            model.load_state_dict(sd_t)        
+            
+        return model 
+    
     def load_model(self):
         self.features_t = []
         self.features_s = []
@@ -118,16 +149,29 @@ class STPM():
             self.features_s.append(output)
         
         self.model_t = resnet18(pretrained=True).to(device)
+        
+        print("self.load_robust  : ", self.load_robust)
+
+        if self.load_robust=='True' :
+            print("\n\n\ salam \n\n")
+            self.model_t= self.load_robust_model(self.model_t)
+
+
         self.model_t.layer1[-1].register_forward_hook(hook_t)
         self.model_t.layer2[-1].register_forward_hook(hook_t)
         self.model_t.layer3[-1].register_forward_hook(hook_t)
 
         self.model_s = resnet18(pretrained=False).to(device)
+        
+        if self.load_robust=='True' :
+            self.model_s= self.load_robust_model(self.model_s)
+
+
         self.model_s.layer1[-1].register_forward_hook(hook_s)
         self.model_s.layer2[-1].register_forward_hook(hook_s)
         self.model_s.layer3[-1].register_forward_hook(hook_s)
         
-    def train(self):
+    def train(self,trainloader):
 
         self.criterion = torch.nn.MSELoss(reduction='sum')
         self.optimizer = torch.optim.SGD(self.model_s.parameters(), lr=lr, momentum=0.9, weight_decay=0.0001)
@@ -144,22 +188,27 @@ class STPM():
             print('-'*20)
             self.model_t.eval()
             self.model_s.train()
-            for idx, (batch, _) in enumerate(self.dataloaders): # batch loop
-                global_step += 1
-                batch = batch.to(device)
-                self.optimizer.zero_grad()
-                with torch.set_grad_enabled(True):
-                    self.features_t = []
-                    self.features_s = []
-                    _ = self.model_t(batch)
-                    _ = self.model_s(batch)
-                    # get loss using features.
-                    loss = cal_loss(self.features_s, self.features_t, self.criterion)
-                    loss.backward()
-                    self.optimizer.step()
+            # for idx, (batch, _) in enumerate(trainloader): # batch loop
+            
+            with tqdm(trainloader, unit="batch") as tepoch:
+                for idx, (batch, _) in enumerate(tepoch):
+                    global_step += 1
+                    batch = batch.to(device)
+                    self.optimizer.zero_grad()
+                    with torch.set_grad_enabled(True):
+                        self.features_t = []
+                        self.features_s = []
+                        _ = self.model_t(batch)
+                        _ = self.model_s(batch)
+                        # get loss using features.
+                        loss = cal_loss(self.features_s, self.features_t, self.criterion)
+                        loss.backward()
+                        self.optimizer.step()
 
-                if idx%2 == 0:
-                    print('Epoch : {} | Loss : {:.4f}'.format(epoch, float(loss.data)))
+                    tepoch.set_postfix(loss=float(loss.data))
+
+                    # if idx%2 == 0:
+                    #     print('Epoch : {} | Loss : {:.4f}'.format(epoch, float(loss.data)))
 
         print('Total time consumed : {}'.format(time.time() - start_time))
         print('Train end.')
@@ -168,32 +217,41 @@ class STPM():
         #     torch.save(self.model_s.state_dict(), os.path.join(weight_save_path, 'model_s.pth'))
 
     
-    def AttackImage(self,image,label):
-        image = image.clone().detach().cuda()
-        label = label.clone().detach().cuda()
+    def AttackImage(self,images,labels):
+        r"""
+        Overridden.
+        """
+        images = images.clone().detach().cuda()
+        labels = labels.clone().detach().cuda()
+
+
+
+        loss = torch.nn.BCEWithLogitsLoss()
+
+        adv_images = images.clone().detach()
 
         alpha = (2.5 * self.eps) / self.steps
-        
 
-        adv_images = image.clone().detach()
 
-        for _ in range(10):
-            adv_images.requires_grad = True 
 
-            score=self.getScore(adv_images)
-            grad = torch.autograd.grad(score, adv_images,
-                            retain_graph=False, create_graph=False)[0]
-            
-            if label==0:
-                adv_images = adv_images.detach() + alpha*grad.sign()
-            else : 
-                adv_images = adv_images.detach() - alpha*grad.sign()
-            
-            delta = torch.clamp(adv_images - image, min=-self.eps, max=self.eps)
-            adv_images = torch.clamp(image + delta, min=0, max=1).detach()
-        
+        for _ in range(self.steps):
+            adv_images.requires_grad = True
+            # outputs = self.get_logits(adv_images)
+            outputs=self.getScore(adv_images)
+
+
+            cost = loss(outputs, torch.tensor(labels.float().item()).cuda())
+
+            # Update adversarial images
+            grad = torch.autograd.grad(cost, adv_images,
+                                       retain_graph=False, create_graph=False)[0]
+
+            adv_images = adv_images.detach() + alpha*grad.sign()
+            delta = torch.clamp(adv_images - images, min=-self.eps, max=self.eps)
+            adv_images = torch.clamp(images + delta, min=0, max=1).detach()
+
         return adv_images
-
+    
     def getScore(self,test_img):
         self.features_t = []
         self.features_s = []
@@ -223,7 +281,7 @@ class STPM():
 
         start_time = time.time()
          
-        for test_img,lbl in tqdm(test_loader):
+        for idx,(test_img,lbl) in enumerate(tqdm(test_loader)):
 
             test_img = test_img.to(device)
             lbl = lbl.to(device)
@@ -235,10 +293,10 @@ class STPM():
             adv_image=self.AttackImage(test_img,lbl)
             adv_score=self.getScore(adv_image)
 
-            # print(f'Label : {lbl.detach().data}')
-            # print(f'clean_score : {clean_score.detach().data}')
-            # print(f'adv_score : {adv_score.detach().data}')
-            # print("\n")
+            print(f'Label : {lbl.detach().data}')
+            print(f'clean_score : {clean_score.detach().data}')
+            print(f'adv_score : {adv_score.detach().data}')
+            print("\n")
 
             
 
@@ -248,13 +306,24 @@ class STPM():
             adv_scores.append(adv_score.detach().item())
             labels.append(lbl.detach().item()) 
 
+            # if lbl==0:
+            #     break
+
+            # if idx==30:
+                # break
+
   
         print('Total test time consumed : {}'.format(time.time() - start_time))
         # print("Total image-level auc-roc score :")
         # print(roc_auc_score(gt_list_img_lvl, pred_list_img_lvl))
+        print("roc_auc_score(labels, clean_scores) : ",roc_auc_score(labels, clean_scores))
+        print("roc_auc_score(labels, adv_scores) : ", roc_auc_score(labels, adv_scores))
 
 
         df = pd.DataFrame({'Clean_AUC': [roc_auc_score(labels, clean_scores)], 'Adv_AUC': [roc_auc_score(labels, adv_scores)]})
+        if not os.path.isdir('./result_dir/'):
+            os.mkdir('./result_dir/')
+        
         df.to_csv(f'./result_dir/results_{self.dataset_name}_NormalClass_{self.normal_class}_eps_{self.eps:.3f}.csv', index=False)
 
 
@@ -271,10 +340,11 @@ def get_args():
     parser.add_argument('--save_src_code', default=False)
     parser.add_argument('--save_anomaly_map', default=True)
     
-    parser.add_argument('--dataset', default='cifar10')
-    parser.add_argument('--normal_class', default=0)
-    parser.add_argument('--attack_eps', default=8/255)
-    parser.add_argument('--steps', default=10)
+    parser.add_argument('--dataset', default='cifar10',type=str)
+    parser.add_argument('--normal_class', default=0,type=int)
+    parser.add_argument('--attack_eps', default=8/255,type=float)
+    parser.add_argument('--steps', default=10,type=int)
+    parser.add_argument('--load_robust', default='True',type=str)
     args = parser.parse_args()
     return args
 
@@ -282,10 +352,10 @@ def get_args():
 
 
 def get_CIFAR10(normal_class_indx:int, transform):
-    trainset = CIFAR10(root='./data', train=True, download=False,transform=transform)
+    trainset = CIFAR10(root='./data', train=True, download=True,transform=transform)
     trainset.data = trainset.data[np.array(trainset.targets) == normal_class_indx]
 
-    testset = CIFAR10(root='./data', train=False, download=False, transform=transform)
+    testset = CIFAR10(root='./data', train=False, download=True, transform=transform)
     testset.targets  = [int(t!=normal_class_indx) for t in testset.targets]
 
     return trainset, testset
@@ -342,7 +412,7 @@ def getDatasetLoader(dataset,normal_class_indx):
         # trainset, testset=get_MVTEC(normal_class_indx, transform)
     
     trainset_loader=DataLoader(trainset, batch_size=32, shuffle=True, num_workers=0) #, pin_memory=True)
-    testset_loader=DataLoader(testset, batch_size=1, shuffle=True, num_workers=0) #, pin_memory=True)
+    testset_loader=DataLoader(testset, batch_size=1, shuffle=False, num_workers=0) #, pin_memory=True)
 
     return trainset_loader,testset_loader
 
@@ -359,7 +429,7 @@ if __name__ == '__main__':
     phase = args.phase
     dataset_path = args.dataset_path
     category = dataset_path.split('\\')[-1]
-    num_epochs = args.num_epoch
+    num_epochs = int(args.num_epoch)
     lr = args.lr
     batch_size = int(args.batch_size)
     save_weight = True
@@ -378,7 +448,7 @@ if __name__ == '__main__':
         copy_files('./', source_code_save_path, ['.git','.vscode','__pycache__','logs','README']) # copy source code
     
 
-    stpm = STPM(args.attack_eps,args.steps,args.dataset,args.normal_class)
+    stpm = STPM(args.attack_eps,args.steps,args.dataset,args.normal_class,args.load_robust)
 
     trainset_loader,testset_loader=getDatasetLoader(args.dataset,args.normal_class)
 
