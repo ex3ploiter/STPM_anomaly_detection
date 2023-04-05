@@ -384,7 +384,17 @@ def get_FASHION_MNIST(normal_class_indx:int, transform):
 
 
 def getDatasetLoader(dataset,normal_class_indx):
-    transform = transforms.Compose([
+
+    transform_1d = transforms.Compose([
+            transforms.Resize((load_size, load_size), Image.ANTIALIAS),
+             transforms.Grayscale(num_output_channels=3),
+            transforms.ToTensor(),
+            transforms.CenterCrop(input_size),
+            transforms.Normalize(mean=mean_train,
+                                std=std_train)])
+
+
+    transform_3d = transforms.Compose([
             transforms.Resize((load_size, load_size), Image.ANTIALIAS),
             transforms.ToTensor(),
             transforms.CenterCrop(input_size),
@@ -392,15 +402,15 @@ def getDatasetLoader(dataset,normal_class_indx):
                                 std=std_train)])
 
     if dataset == 'cifar10':
-        trainset, testset=get_CIFAR10(normal_class_indx, transform)
+        trainset, testset=get_CIFAR10(normal_class_indx, transform_3d)
     elif dataset == 'cifar100':
-        trainset, testset=get_CIFAR100(normal_class_indx, transform)
+        trainset, testset=get_CIFAR100(normal_class_indx, transform_3d)
     elif dataset == 'mnist':
-        trainset, testset=get_MNIST(normal_class_indx, transform)
+        trainset, testset=get_MNIST(normal_class_indx, transform_1d)
     elif dataset == 'fashion':
-        trainset, testset=get_FASHION_MNIST(normal_class_indx, transform)
-    elif dataset == 'svhn':
-        trainset, testset=get_SVHN(normal_class_indx, transform)
+        trainset, testset=get_FASHION_MNIST(normal_class_indx, transform_1d)
+    # elif dataset == 'svhn':
+    #     trainset, testset=get_SVHN(normal_class_indx, transform)
     # elif dataset == 'mvtec':
         # trainset, testset=get_MVTEC(normal_class_indx, transform)
     
