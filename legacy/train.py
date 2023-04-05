@@ -358,7 +358,7 @@ def get_args():
     
     parser.add_argument('--dataset_root', default=r'/home/changwoo/hdd/datasets/mvtec_anomaly_detection/tile') #D:\Dataset\mvtec_anomaly_detection\transistor')
     parser.add_argument('--normal_class', default=0,type=int)
-    parser.add_argument('--attack_eps', default=8/255,type=float)
+    parser.add_argument('--attack_eps', default=2/255,type=float)
     parser.add_argument('--steps', default=10,type=int)
     parser.add_argument('--load_robust', default='True',type=str)    
     args = parser.parse_args()
