@@ -109,13 +109,6 @@ class STPM():
        
 
 
-    def load_dataset(self):
-        image_datasets = datasets.ImageFolder(root=os.path.join(dataset_path, 'train'), transform=self.data_transform)
-        self.dataloaders = DataLoader(image_datasets, batch_size=batch_size, shuffle=True, num_workers=0) #, pin_memory=True)
-        dataset_sizes = {'train': len(image_datasets)}    
-        print('Dataset size : Train set - {}'.format(dataset_sizes['train']))    
-
-    
     def load_robust_model(self,model):
         mode=1
         resume_path='/content/STPM_anomaly_detection/legacy/resnet18_linf_eps8.0.ckpt?sv=2020-08-04&ss=bfqt&srt=sco&sp=rwdlacupitfx&se=2051-10-06T07:09:59Z&st=2021-10-05T23:09:59Z&spr=https,http&sig=U69sEOSMlliobiw8OgiZpLTaYyOA5yt5pHHH5%2FKUYgI='
@@ -176,7 +169,7 @@ class STPM():
         self.criterion = torch.nn.MSELoss(reduction='sum')
         self.optimizer = torch.optim.SGD(self.model_s.parameters(), lr=lr, momentum=0.9, weight_decay=0.0001)
 
-        self.load_dataset()
+        
         
         start_time = time.time()
         global_step = 0
