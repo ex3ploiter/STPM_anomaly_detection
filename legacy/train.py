@@ -150,10 +150,10 @@ class STPM():
         
         self.model_t = resnet18(pretrained=True).to(device)
         
-        print("self.load_robust  : ", self.load_robust)
+        
 
         if self.load_robust=='True' :
-            print("\n\n\ salam \n\n")
+            
             self.model_t= self.load_robust_model(self.model_t)
 
 
