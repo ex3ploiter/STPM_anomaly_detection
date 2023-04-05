@@ -12,6 +12,7 @@ import time
 from torchvision.models import resnet18
 from PIL import Image
 from sklearn.metrics import roc_auc_score
+from tqdm import tqdm 
 
 #imagenet
 mean_train = [0.485, 0.456, 0.406]
@@ -159,128 +160,100 @@ class STPM():
             print('Save weights.')
             torch.save(self.model_s.state_dict(), os.path.join(weight_save_path, 'model_s.pth'))
 
-    def test(self):
+    
+    def AttackImage(self,image,label):
+        image = image.clone().detach().to(self.device)
+        label = label.clone().detach().to(self.device)
+
+        adv_images = image.clone().detach()
+
+        for _ in range(10):
+            adv_images.requires_grad = True 
+
+            score=self.getScore(adv_images)
+            grad = torch.autograd.grad(score, adv_images,
+                            retain_graph=False, create_graph=False)[0]
+            
+            if label==0:
+                adv_images = adv_images.detach() + self.alpha*grad.sign()
+            else : 
+                adv_images = adv_images.detach() - self.alpha*grad.sign()
+            
+            delta = torch.clamp(adv_images - image, min=-self.eps, max=self.eps)
+            adv_images = torch.clamp(image + delta, min=0, max=1).detach()
+        
+        return adv_images
+
+    def getScore(self,test_img):
+        self.features_t = []
+        self.features_s = []
+        _ = self.model_t(test_img)
+        _ = self.model_s(test_img)
+    
+        anomaly_map, _ = cal_anomaly_map(self.features_s, self.features_t, out_size=input_size)
+        
+        return torch.max(anomaly_map)
+        
+        # pred_list_img_lvl.append(np.max(anomaly_map))
+
+    def test(self,test_loader=None):
         print('Test phase start')
         try:
             self.model_s.load_state_dict(torch.load(glob.glob(weight_save_path+'/*.pth')[0]))
         except:
             raise Exception('Check saved model path.')
+
         self.model_t.eval()
         self.model_s.eval()
         
-        test_path = os.path.join(dataset_path, 'test')
-        gt_path = os.path.join(dataset_path, 'ground_truth')
-        test_imgs_all = glob.glob(test_path + '/**/*.png', recursive=True)
-        test_imgs = [i for i in test_imgs_all if "good" not in i]
-        test_imgs_good = [i for i in test_imgs_all if "good" in i]
-        gt_imgs = glob.glob(gt_path + '/**/*.png', recursive=True)
-        test_imgs.sort()
-        gt_imgs.sort()
-        gt_list_px_lvl = []
+        # test_path = os.path.join(dataset_path, 'test')
+        
+        # test_imgs_all = glob.glob(test_path + '/**/*.png', recursive=True)
+        # test_imgs = [i for i in test_imgs_all if "good" not in i]
+        # test_imgs_good = [i for i in test_imgs_all if "good" in i]
+        
+        # test_imgs.sort()
+        
         gt_list_img_lvl = []
-        pred_list_px_lvl = []
         pred_list_img_lvl = []
         start_time = time.time()
-        print("Testset size : ", len(gt_imgs))        
-        for i in range(len(test_imgs)):
-            test_img_path = test_imgs[i]
-            gt_img_path = gt_imgs[i]
-            assert os.path.split(test_img_path)[1].split('.')[0] == os.path.split(gt_img_path)[1].split('_')[0], "Something wrong with test and ground truth pair!"
-            defect_type = os.path.split(os.path.split(test_img_path)[0])[1]
-            img_name = os.path.split(test_img_path)[1].split('.')[0]
+         
+        for test_img,lbl in tqdm(test_loader):
 
-            # ground truth
-            gt_img_o = cv2.imread(gt_img_path,0)
-            gt_img_o = cv2.resize(gt_img_o, (load_size, load_size))
-            gt_img_o = gt_img_o[(load_size-input_size)//2:(load_size+input_size)//2,(load_size-input_size)//2:(load_size+input_size)//2]
-            gt_list_px_lvl.extend(gt_img_o.ravel()//255)
-
-            # load image
-            test_img_o = cv2.imread(test_img_path)
-            test_img_o = cv2.resize(test_img_o, (load_size, load_size))
-            test_img_o = test_img_o[(load_size-input_size)//2:(load_size+input_size)//2,(load_size-input_size)//2:(load_size+input_size)//2]
-            test_img = cv2.cvtColor(test_img_o, cv2.COLOR_BGR2RGB) # <~ here
-            test_img = Image.fromarray(test_img)
-            test_img = self.data_transform(test_img)
             test_img = torch.unsqueeze(test_img, 0).to(device)
-            with torch.set_grad_enabled(False):
-                self.features_t = []
-                self.features_s = []
-                _ = self.model_t(test_img)
-                _ = self.model_s(test_img)
-            # get anomaly map & each features
-            anomaly_map, a_maps = cal_anomaly_map(self.features_s, self.features_t, out_size=input_size)
-            pred_list_px_lvl.extend(anomaly_map.ravel())
-            pred_list_img_lvl.append(np.max(anomaly_map))
-            gt_list_img_lvl.append(1)
 
-            # save anomaly map & features
-            if args.save_anomaly_map:
-                # normalize anomaly amp
-                anomaly_map_norm = min_max_norm(anomaly_map)
-                anomaly_map_norm_hm = cvt2heatmap(anomaly_map_norm*255)
-                # 64x64 map
-                am64 = min_max_norm(a_maps[0])
-                am64 = cvt2heatmap(am64*255)
-                # 32x32 map
-                am32 = min_max_norm(a_maps[1])
-                am32 = cvt2heatmap(am32*255)
-                # 16x16 map
-                am16 = min_max_norm(a_maps[2])
-                am16 = cvt2heatmap(am16*255)
-                # anomaly map on image
-                heatmap = cvt2heatmap(anomaly_map_norm*255)
-                hm_on_img = heatmap_on_image(heatmap, test_img_o)
-
-                # save images
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}.jpg'), test_img_o)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_am64.jpg'), am64)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_am32.jpg'), am32)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_am16.jpg'), am16)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_amap.jpg'), anomaly_map_norm_hm)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_amap_on_img.jpg'), hm_on_img)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_gt.jpg'), gt_img_o)
+            
         
-        # Test good image for image level score
-        for i in range(len(test_imgs_good)):
-            test_img_path = test_imgs_good[i]
-            defect_type = os.path.split(os.path.split(test_img_path)[0])[1]
-            img_name = os.path.split(test_img_path)[1].split('.')[0]
+            clean_score=self.getScore(test_img)
+            
+            adv_image=self.AttackImage(test_img,lbl)
+            adv_score=self.getScore(adv_image)
 
-            # load image
-            test_img_o = cv2.imread(test_img_path)
-            test_img_o = cv2.resize(test_img_o, (load_size, load_size))
-            test_img_o = test_img_o[(load_size-input_size)//2:(load_size+input_size)//2,(load_size-input_size)//2:(load_size+input_size)//2]
-            test_img = cv2.cvtColor(test_img_o, cv2.COLOR_BGR2RGB) # <~ here
-            test_img = Image.fromarray(test_img)
-            test_img = self.data_transform(test_img)
-            test_img = torch.unsqueeze(test_img, 0).to(device)
-            with torch.set_grad_enabled(False):
-                self.features_t = []
-                self.features_s = []
-                _ = self.model_t(test_img)
-                _ = self.model_s(test_img)
-            anomaly_map, a_maps = cal_anomaly_map(self.features_s, self.features_t, out_size=input_size)
-            pred_list_img_lvl.append(np.max(anomaly_map))
-            gt_list_img_lvl.append(0)
-                    
+            
+
+
+
+
+            gt_list_img_lvl.append(lbl.detach().item()) ###
+
+  
         print('Total test time consumed : {}'.format(time.time() - start_time))
-        print("Total pixel-level auc-roc score :")
-        print(roc_auc_score(gt_list_px_lvl, pred_list_px_lvl))
+        # print("Total pixel-level auc-roc score :")
+        # print(roc_auc_score(gt_list_px_lvl, pred_list_px_lvl))
         print("Total image-level auc-roc score :")
         print(roc_auc_score(gt_list_img_lvl, pred_list_img_lvl))
 
 def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', default='train')
-    parser.add_argument('--dataset_path', default=r'/home/changwoo/hdd/datasets/mvtec_anomaly_detection/tile') #D:\Dataset\mvtec_anomaly_detection\transistor')
+    parser.add_argument('--dataset_path', default=r'/content/mvtec_anomaly_detection/tile') #D:\Dataset\mvtec_anomaly_detection\transistor')
     parser.add_argument('--num_epoch', default=100)
     parser.add_argument('--lr', default=0.4)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=256)
     parser.add_argument('--input_size', default=256)
-    parser.add_argument('--project_path', default=r'/home/changwoo/hdd/project_results/STPM_results') #D:\Project_Train_Results\mvtec_anomaly_detection\transistor_new_temp')
-    parser.add_argument('--save_src_code', default=True)
+    parser.add_argument('--project_path', default=r'/content/project_results/STPM_results') #D:\Project_Train_Results\mvtec_anomaly_detection\transistor_new_temp')
+    parser.add_argument('--save_src_code', default=False)
     parser.add_argument('--save_anomaly_map', default=True)
     args = parser.parse_args()
     return args
