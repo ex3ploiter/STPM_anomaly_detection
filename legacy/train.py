@@ -13,6 +13,8 @@ from torchvision.models import resnet18
 from PIL import Image
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm 
+from torchvision.datasets import CIFAR10, CIFAR100, MNIST, SVHN, FashionMNIST
+import pandas as pd
 
 #imagenet
 mean_train = [0.485, 0.456, 0.406]
@@ -57,7 +59,7 @@ def cal_loss(fs_list, ft_list, criterion):
     return tot_loss
 
 def cal_anomaly_map(fs_list, ft_list, out_size=224):
-    anomaly_map = np.ones([out_size, out_size])
+    anomaly_map = torch.ones(out_size, out_size).cuda()
     a_map_list = []
     for i in range(len(ft_list)):
         fs = fs_list[i]
@@ -67,7 +69,8 @@ def cal_anomaly_map(fs_list, ft_list, out_size=224):
         a_map = 1 - F.cosine_similarity(fs_norm, ft_norm)
         a_map = torch.unsqueeze(a_map, dim=1)
         a_map = F.interpolate(a_map, size=out_size, mode='bilinear')
-        a_map = a_map[0,0,:,:].to('cpu').detach().numpy()
+        # a_map = a_map[0,0,:,:].to('cpu').detach().numpy()
+        a_map = a_map[0,0,:,:]
         a_map_list.append(a_map)
         anomaly_map *= a_map
     return anomaly_map, a_map_list
@@ -92,9 +95,13 @@ def min_max_norm(image):
     return (image-a_min)/(a_max - a_min)    
 
 class STPM():
-    def __init__(self):
+    def __init__(self,attack_eps,steps,dataset_name,normal_class):
         self.load_model()
         self.data_transform = data_transforms(load_size=load_size, mean_train=mean_train, std_train=std_train)
+        self.eps=attack_eps
+        self.steps=steps
+        self.dataset_name=dataset_name
+        self.normal_class=normal_class
 
     def load_dataset(self):
         image_datasets = datasets.ImageFolder(root=os.path.join(dataset_path, 'train'), transform=self.data_transform)
@@ -156,14 +163,17 @@ class STPM():
 
         print('Total time consumed : {}'.format(time.time() - start_time))
         print('Train end.')
-        if save_weight:
-            print('Save weights.')
-            torch.save(self.model_s.state_dict(), os.path.join(weight_save_path, 'model_s.pth'))
+        # if save_weight:
+        #     print('Save weights.')
+        #     torch.save(self.model_s.state_dict(), os.path.join(weight_save_path, 'model_s.pth'))
 
     
     def AttackImage(self,image,label):
-        image = image.clone().detach().to(self.device)
-        label = label.clone().detach().to(self.device)
+        image = image.clone().detach().cuda()
+        label = label.clone().detach().cuda()
+
+        alpha = (2.5 * self.eps) / self.steps
+        
 
         adv_images = image.clone().detach()
 
@@ -175,9 +185,9 @@ class STPM():
                             retain_graph=False, create_graph=False)[0]
             
             if label==0:
-                adv_images = adv_images.detach() + self.alpha*grad.sign()
+                adv_images = adv_images.detach() + alpha*grad.sign()
             else : 
-                adv_images = adv_images.detach() - self.alpha*grad.sign()
+                adv_images = adv_images.detach() - alpha*grad.sign()
             
             delta = torch.clamp(adv_images - image, min=-self.eps, max=self.eps)
             adv_images = torch.clamp(image + delta, min=0, max=1).detach()
@@ -198,29 +208,25 @@ class STPM():
 
     def test(self,test_loader=None):
         print('Test phase start')
-        try:
-            self.model_s.load_state_dict(torch.load(glob.glob(weight_save_path+'/*.pth')[0]))
-        except:
-            raise Exception('Check saved model path.')
+        # try:
+        #     self.model_s.load_state_dict(torch.load(glob.glob(weight_save_path+'/*.pth')[0]))
+        # except:
+        #     raise Exception('Check saved model path.')
 
         self.model_t.eval()
         self.model_s.eval()
         
-        # test_path = os.path.join(dataset_path, 'test')
         
-        # test_imgs_all = glob.glob(test_path + '/**/*.png', recursive=True)
-        # test_imgs = [i for i in test_imgs_all if "good" not in i]
-        # test_imgs_good = [i for i in test_imgs_all if "good" in i]
-        
-        # test_imgs.sort()
-        
-        gt_list_img_lvl = []
-        pred_list_img_lvl = []
+        labels=[]
+        clean_scores=[]
+        adv_scores=[]
+
         start_time = time.time()
          
         for test_img,lbl in tqdm(test_loader):
 
-            test_img = torch.unsqueeze(test_img, 0).to(device)
+            test_img = test_img.to(device)
+            lbl = lbl.to(device)
 
             
         
@@ -229,19 +235,28 @@ class STPM():
             adv_image=self.AttackImage(test_img,lbl)
             adv_score=self.getScore(adv_image)
 
+            # print(f'Label : {lbl.detach().data}')
+            # print(f'clean_score : {clean_score.detach().data}')
+            # print(f'adv_score : {adv_score.detach().data}')
+            # print("\n")
+
             
 
 
 
-
-            gt_list_img_lvl.append(lbl.detach().item()) ###
+            clean_scores.append(clean_score.detach().item())
+            adv_scores.append(adv_score.detach().item())
+            labels.append(lbl.detach().item()) 
 
   
         print('Total test time consumed : {}'.format(time.time() - start_time))
-        # print("Total pixel-level auc-roc score :")
-        # print(roc_auc_score(gt_list_px_lvl, pred_list_px_lvl))
-        print("Total image-level auc-roc score :")
-        print(roc_auc_score(gt_list_img_lvl, pred_list_img_lvl))
+        # print("Total image-level auc-roc score :")
+        # print(roc_auc_score(gt_list_img_lvl, pred_list_img_lvl))
+
+
+        df = pd.DataFrame({'Clean_AUC': [roc_auc_score(labels, clean_scores)], 'Adv_AUC': [roc_auc_score(labels, adv_scores)]})
+        df.to_csv(f'./result_dir/results_{self.dataset_name}_NormalClass_{self.normal_class}_eps_{self.eps:.3f}.csv', index=False)
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
@@ -255,8 +270,81 @@ def get_args():
     parser.add_argument('--project_path', default=r'/content/project_results/STPM_results') #D:\Project_Train_Results\mvtec_anomaly_detection\transistor_new_temp')
     parser.add_argument('--save_src_code', default=False)
     parser.add_argument('--save_anomaly_map', default=True)
+    
+    parser.add_argument('--dataset', default='cifar10')
+    parser.add_argument('--normal_class', default=0)
+    parser.add_argument('--attack_eps', default=8/255)
+    parser.add_argument('--steps', default=10)
     args = parser.parse_args()
     return args
+
+
+
+
+def get_CIFAR10(normal_class_indx:int, transform):
+    trainset = CIFAR10(root='./data', train=True, download=False,transform=transform)
+    trainset.data = trainset.data[np.array(trainset.targets) == normal_class_indx]
+
+    testset = CIFAR10(root='./data', train=False, download=False, transform=transform)
+    testset.targets  = [int(t!=normal_class_indx) for t in testset.targets]
+
+    return trainset, testset
+
+def get_CIFAR100(normal_class_indx:int, transform):
+    trainset = CIFAR100(root=CIFAR10_PATH, train=True, download=False,transform=transform)
+    trainset.data = trainset.data[np.array(trainset.targets) == normal_class_indx]
+
+    testset = CIFAR100(root=CIFAR10_PATH, train=False, download=False, transform=transform)
+    testset.targets  = [int(t!=normal_class_indx) for t in testset.targets]
+
+    return trainset, testset
+
+
+def get_MNIST(normal_class_indx:int, transform):
+    trainset = MNIST(root=MNIST_PATH, train=True, download=False,transform=transform)
+    trainset.data = trainset.data[np.array(trainset.targets) == normal_class_indx]
+
+    testset = MNIST(root=MNIST_PATH, train=False, download=False, transform=transform)
+    testset.targets  = [int(t!=normal_class_indx) for t in testset.targets]
+
+    return trainset, testset
+
+def get_FASHION_MNIST(normal_class_indx:int, transform):
+    trainset = FashionMNIST(root=FMNIST_PATH, train=True, download=False,transform=transform)
+    trainset.data = trainset.data[np.array(trainset.targets) == normal_class_indx]
+
+    testset = FashionMNIST(root=FMNIST_PATH, train=False, download=False, transform=transform)
+    testset.targets  = [int(t!=normal_class_indx) for t in testset.targets]
+
+    return trainset, testset
+
+
+
+def getDatasetLoader(dataset,normal_class_indx):
+    transform = transforms.Compose([
+            transforms.Resize((load_size, load_size), Image.ANTIALIAS),
+            transforms.ToTensor(),
+            transforms.CenterCrop(input_size),
+            transforms.Normalize(mean=mean_train,
+                                std=std_train)])
+
+    if dataset == 'cifar10':
+        trainset, testset=get_CIFAR10(normal_class_indx, transform)
+    elif dataset == 'cifar100':
+        trainset, testset=get_CIFAR100(normal_class_indx, transform)
+    elif dataset == 'mnist':
+        trainset, testset=get_MNIST(normal_class_indx, transform)
+    elif dataset == 'fashion':
+        trainset, testset=get_FASHION_MNIST(normal_class_indx, transform)
+    elif dataset == 'svhn':
+        trainset, testset=get_SVHN(normal_class_indx, transform)
+    # elif dataset == 'mvtec':
+        # trainset, testset=get_MVTEC(normal_class_indx, transform)
+    
+    trainset_loader=DataLoader(trainset, batch_size=32, shuffle=True, num_workers=0) #, pin_memory=True)
+    testset_loader=DataLoader(testset, batch_size=1, shuffle=True, num_workers=0) #, pin_memory=True)
+
+    return trainset_loader,testset_loader
 
 
 if __name__ == '__main__':
@@ -273,7 +361,7 @@ if __name__ == '__main__':
     category = dataset_path.split('\\')[-1]
     num_epochs = args.num_epoch
     lr = args.lr
-    batch_size = args.batch_size
+    batch_size = int(args.batch_size)
     save_weight = True
     load_size = args.load_size
     input_size = args.input_size
@@ -290,11 +378,14 @@ if __name__ == '__main__':
         copy_files('./', source_code_save_path, ['.git','.vscode','__pycache__','logs','README']) # copy source code
     
 
-    stpm = STPM()
+    stpm = STPM(args.attack_eps,args.steps,args.dataset,args.normal_class)
+
+    trainset_loader,testset_loader=getDatasetLoader(args.dataset,args.normal_class)
+
     if phase == 'train':
-        stpm.train()
-        stpm.test()
+        stpm.train(trainset_loader)
+        stpm.test(testset_loader)
     elif phase == 'test':
-        stpm.test()
+        stpm.test(testset_loader)
     else:
         print('Phase argument must be train or test.')
