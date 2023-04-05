@@ -293,10 +293,10 @@ class STPM():
             adv_image=self.AttackImage(test_img,lbl)
             adv_score=self.getScore(adv_image)
 
-            print(f'Label : {lbl.detach().data}')
-            print(f'clean_score : {clean_score.detach().data}')
-            print(f'adv_score : {adv_score.detach().data}')
-            print("\n")
+            # print(f'Label : {lbl.detach().data}')
+            # print(f'clean_score : {clean_score.detach().data}')
+            # print(f'adv_score : {adv_score.detach().data}')
+            # print("\n")
 
             
 
