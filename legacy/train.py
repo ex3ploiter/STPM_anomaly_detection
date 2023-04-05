@@ -56,7 +56,7 @@ def cal_loss(fs_list, ft_list, criterion):
     return tot_loss
 
 def cal_anomaly_map(fs_list, ft_list, out_size=224):
-    anomaly_map = np.ones([out_size, out_size])
+    anomaly_map = torch.ones((out_size, out_size)).cuda()
     a_map_list = []
     for i in range(len(ft_list)):
         fs = fs_list[i]
@@ -66,7 +66,8 @@ def cal_anomaly_map(fs_list, ft_list, out_size=224):
         a_map = 1 - F.cosine_similarity(fs_norm, ft_norm)
         a_map = torch.unsqueeze(a_map, dim=1)
         a_map = F.interpolate(a_map, size=out_size, mode='bilinear')
-        a_map = a_map[0,0,:,:].to('cpu').detach().numpy()
+        # a_map = a_map[0,0,:,:].to('cpu').detach().numpy()
+        a_map = a_map[0,0,:,:]
         a_map_list.append(a_map)
         anomaly_map *= a_map
     return anomaly_map, a_map_list
@@ -159,6 +160,65 @@ class STPM():
             print('Save weights.')
             torch.save(self.model_s.state_dict(), os.path.join(weight_save_path, 'model_s.pth'))
 
+    def read_img(self,test_img_path):
+        test_img_o = cv2.imread(test_img_path)
+        test_img_o = cv2.resize(test_img_o, (load_size, load_size))
+        test_img_o = test_img_o[(load_size-input_size)//2:(load_size+input_size)//2,(load_size-input_size)//2:(load_size+input_size)//2]
+        test_img = cv2.cvtColor(test_img_o, cv2.COLOR_BGR2RGB) # <~ here
+        test_img = Image.fromarray(test_img)
+        test_img = self.data_transform(test_img)
+        test_img = torch.unsqueeze(test_img, 0).to(device)    
+
+        return test_img
+    
+
+    def AttackImage(self,images,labels):
+        r"""
+        Overridden.
+        """
+        images = images.clone().detach().cuda()
+        labels = labels.clone().detach().cuda()
+
+
+
+        loss = torch.nn.BCEWithLogitsLoss()
+
+        adv_images = images.clone().detach()
+
+        alpha = (2.5 * self.eps) / self.steps
+
+
+
+        for _ in range(self.steps):
+            adv_images.requires_grad = True
+            # outputs = self.get_logits(adv_images)
+            outputs=self.getScore(adv_images)
+
+
+            cost = loss(outputs, torch.tensor(labels.float().item()).cuda())
+
+            # Update adversarial images
+            grad = torch.autograd.grad(cost, adv_images,
+                                       retain_graph=False, create_graph=False)[0]
+
+            adv_images = adv_images.detach() + alpha*grad.sign()
+            delta = torch.clamp(adv_images - images, min=-self.eps, max=self.eps)
+            adv_images = torch.clamp(images + delta, min=0, max=1).detach()
+
+        return adv_images
+    
+
+    def getScore(self,test_img):
+
+        with torch.set_grad_enabled(True):
+            self.features_t = []
+            self.features_s = []
+            _ = self.model_t(test_img)
+            _ = self.model_s(test_img)
+        # get anomaly map & each features
+        anomaly_map, a_maps = cal_anomaly_map(self.features_s, self.features_t, out_size=input_size)
+        return torch.max(anomaly_map)
+    
     def test(self):
         print('Test phase start')
         try:
@@ -180,89 +240,48 @@ class STPM():
         gt_list_img_lvl = []
         pred_list_px_lvl = []
         pred_list_img_lvl = []
+        labels=[]
+        clean_scores=[]
+        adv_scores=[]
         start_time = time.time()
-        print("Testset size : ", len(gt_imgs))        
+        print("Testset size : ", len(gt_imgs))     
+           
         for i in range(len(test_imgs)):
             test_img_path = test_imgs[i]
-            gt_img_path = gt_imgs[i]
-            assert os.path.split(test_img_path)[1].split('.')[0] == os.path.split(gt_img_path)[1].split('_')[0], "Something wrong with test and ground truth pair!"
-            defect_type = os.path.split(os.path.split(test_img_path)[0])[1]
-            img_name = os.path.split(test_img_path)[1].split('.')[0]
+            test_img=self.read_img(test_img_path)
 
-            # ground truth
-            gt_img_o = cv2.imread(gt_img_path,0)
-            gt_img_o = cv2.resize(gt_img_o, (load_size, load_size))
-            gt_img_o = gt_img_o[(load_size-input_size)//2:(load_size+input_size)//2,(load_size-input_size)//2:(load_size+input_size)//2]
-            gt_list_px_lvl.extend(gt_img_o.ravel()//255)
+            lbl=torch.tensor(1).cuda()
+            
 
-            # load image
-            test_img_o = cv2.imread(test_img_path)
-            test_img_o = cv2.resize(test_img_o, (load_size, load_size))
-            test_img_o = test_img_o[(load_size-input_size)//2:(load_size+input_size)//2,(load_size-input_size)//2:(load_size+input_size)//2]
-            test_img = cv2.cvtColor(test_img_o, cv2.COLOR_BGR2RGB) # <~ here
-            test_img = Image.fromarray(test_img)
-            test_img = self.data_transform(test_img)
-            test_img = torch.unsqueeze(test_img, 0).to(device)
-            with torch.set_grad_enabled(False):
-                self.features_t = []
-                self.features_s = []
-                _ = self.model_t(test_img)
-                _ = self.model_s(test_img)
-            # get anomaly map & each features
-            anomaly_map, a_maps = cal_anomaly_map(self.features_s, self.features_t, out_size=input_size)
-            pred_list_px_lvl.extend(anomaly_map.ravel())
-            pred_list_img_lvl.append(np.max(anomaly_map))
-            gt_list_img_lvl.append(1)
 
-            # save anomaly map & features
-            if args.save_anomaly_map:
-                # normalize anomaly amp
-                anomaly_map_norm = min_max_norm(anomaly_map)
-                anomaly_map_norm_hm = cvt2heatmap(anomaly_map_norm*255)
-                # 64x64 map
-                am64 = min_max_norm(a_maps[0])
-                am64 = cvt2heatmap(am64*255)
-                # 32x32 map
-                am32 = min_max_norm(a_maps[1])
-                am32 = cvt2heatmap(am32*255)
-                # 16x16 map
-                am16 = min_max_norm(a_maps[2])
-                am16 = cvt2heatmap(am16*255)
-                # anomaly map on image
-                heatmap = cvt2heatmap(anomaly_map_norm*255)
-                hm_on_img = heatmap_on_image(heatmap, test_img_o)
+            clean_score=self.getScore(test_img)
+            adv_image=self.AttackImage(test_img,lbl)
+            adv_score=self.getScore(adv_image)
+            
+            clean_scores.append(clean_score.detach().item())
+            adv_scores.append(adv_score.detach().item())
+            labels.append(lbl.detach().item())             
+            
 
-                # save images
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}.jpg'), test_img_o)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_am64.jpg'), am64)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_am32.jpg'), am32)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_am16.jpg'), am16)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_amap.jpg'), anomaly_map_norm_hm)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_amap_on_img.jpg'), hm_on_img)
-                cv2.imwrite(os.path.join(sample_path, f'{defect_type}_{img_name}_gt.jpg'), gt_img_o)
+            
+       
         
         # Test good image for image level score
         for i in range(len(test_imgs_good)):
             test_img_path = test_imgs_good[i]
-            defect_type = os.path.split(os.path.split(test_img_path)[0])[1]
-            img_name = os.path.split(test_img_path)[1].split('.')[0]
+            test_img=self.read_img(test_img_path)
 
-            # load image
-            test_img_o = cv2.imread(test_img_path)
-            test_img_o = cv2.resize(test_img_o, (load_size, load_size))
-            test_img_o = test_img_o[(load_size-input_size)//2:(load_size+input_size)//2,(load_size-input_size)//2:(load_size+input_size)//2]
-            test_img = cv2.cvtColor(test_img_o, cv2.COLOR_BGR2RGB) # <~ here
-            test_img = Image.fromarray(test_img)
-            test_img = self.data_transform(test_img)
-            test_img = torch.unsqueeze(test_img, 0).to(device)
-            with torch.set_grad_enabled(False):
-                self.features_t = []
-                self.features_s = []
-                _ = self.model_t(test_img)
-                _ = self.model_s(test_img)
-            anomaly_map, a_maps = cal_anomaly_map(self.features_s, self.features_t, out_size=input_size)
-            pred_list_img_lvl.append(np.max(anomaly_map))
-            gt_list_img_lvl.append(0)
+            lbl=torch.tensor(0).cuda()
+
+            clean_score=self.getScore(test_img)
+            adv_image=self.AttackImage(test_img,lbl)
+            adv_score=self.getScore(adv_image)
+
+        
+            clean_scores.append(clean_score.detach().item())
+            adv_scores.append(adv_score.detach().item())
+            labels.append(lbl.detach().item())             
+            
                     
         print('Total test time consumed : {}'.format(time.time() - start_time))
         print("Total pixel-level auc-roc score :")
